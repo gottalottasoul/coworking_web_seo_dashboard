@@ -1,0 +1,461 @@
+---
+title: "hana Web & SEO Dashboard "
+resource_files:
+- inc/web_seo_data.RData
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    theme: readable
+    orientation: columns
+    logo: inc/hana_logo_small.png
+    css: inc/corp-styles.css
+    includes:
+      before_body: "inc/google-analytics.js"
+---
+
+```{r setup, include=FALSE}
+library(shiny)
+library(flexdashboard)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(here)
+library(rlang)
+library(RiHana)
+
+ month_to_date<-lubridate::floor_date(Sys.Date(), unit="month")
+
+
+load('inc/web_seo_data.RData')
+ 
+
+
+updatedWebData <- reactive({
+  web_data <-web_data_all_edited %>% 
+    filter(grepl(paste0(input$WebChannel,collapse = "|"),channel),
+           grepl(input$WebEntryPage,landing_content),
+           dau_date>=input$WebTimeRange[1],
+           dau_date<=input$WebTimeRange[2]) %>% 
+    mutate(timespan=case_when(
+           input$WebTimeDimension=='Week'~week_start,
+           input$WebTimeDimension=='Month'~month_start,
+           input$WebTimeDimension=='Quarter'~quarter_start)) %>% 
+    group_by(timespan,channel) %>% 
+    summarise(Active_Users=sum(active_users),
+              `Lead Form Views`=sum(lead_forms_viewed),
+              `Lead Form Submissions`=sum(lead_forms_submitted),
+              `Form Conversion`=sum(lead_forms_submitted)/sum(lead_forms_viewed),
+              `Site Conversion`=sum(lead_forms_submitted)/sum(Active_Users)) %>% 
+  rename_at(vars(starts_with(input$WebMeasure)), list(~paste0("measure"))) %>% 
+  select(timespan,channel,measure)
+
+    # summarise(measure=case_when(
+    #   input$WebMeasure == 'Sessions'~sum(visits),
+    #   input$WebMeasure == 'Lead Form Views'~sum(lead_forms_viewed),
+    #   input$WebMeasure == 'Lead Form Submissions'~sum(lead_forms_submitted),
+    #   input$WebMeasure == 'Form Conversion'~sum(lead_forms_submitted)/sum(lead_forms_viewed),
+    #   input$WebMeasure == 'Site Conversion'~sum(lead_forms_submitted)/sum(visits))
+    #)
+
+  return(web_data)
+})
+
+
+updatedContentData <- reactive({
+ content_data<-web_content_all_edited %>% 
+#   mutate(full_url=paste0(host,"/",page)) %>% 
+  filter(grepl(input$WebFilter,url,ignore.case=TRUE),
+#         !grepl('hana-qa',page),
+         grepl(paste0(input$WebChannel,collapse = "|"),channel),
+         grepl(input$WebEntryPage,landing_content),
+        seg_date>=input$WebTimeRange[1],
+         seg_date<=input$WebTimeRange[2]) %>% 
+   left_join(web_converters) %>% 
+  group_by(path) %>% 
+  summarise(users=n_distinct(anonymous_id),
+            converters=n_distinct(converted_id,na.rm=TRUE)) %>% 
+  arrange(desc(users)) %>% 
+  slice(1:10) %>% 
+  arrange(users) %>% 
+  mutate(page=forcats::as_factor(path))
+  
+  return(content_data)
+})
+
+
+
+updatedWebConversion <- reactive({
+  
+  web_data <-web_data_all_edited %>% 
+    filter(grepl(paste0(input$WebChannel,collapse = "|"),channel),
+           grepl(input$WebEntryPage,landing_content),
+           dau_date>=input$WebTimeRange[1],
+           dau_date<=input$WebTimeRange[2]) %>% 
+    summarise(active_users=sum(active_users),
+              lead_form_views=sum(lead_forms_viewed),
+              lead_form_submissions=sum(lead_forms_submitted),
+              form_conversion=round((lead_form_submissions/lead_form_views)*100,1),
+              site_conversion=round((lead_form_submissions/active_users)*100,1))
+
+  
+  return(web_data)
+})
+
+updatedLeadData <- reactive({
+  lead_data <-digital_leads %>% 
+    filter(grepl(paste0(input$WebChannel,collapse="|"),digital_channel),
+           grepl(input$WebEntryPage,landing_content),
+           create_date>=input$WebTimeRange[1],
+           create_date<=input$WebTimeRange[2]) %>% 
+    mutate(timespan=case_when(
+           input$WebTimeDimension=='Week'~create_week,
+           input$WebTimeDimension=='Month'~create_month,
+           input$WebTimeDimension=='Quarter'~create_quarter)) %>% 
+    group_by(tracking_code) %>% 
+    summarise(leads=n()) %>% 
+    arrange(leads) %>% 
+    mutate(tracking_code=forcats::as_factor(tracking_code))
+    
+  return(lead_data)
+})
+
+searchConsoleSummaryData <- reactive({
+  keyword_data<-search_console_keyword_performance_edited %>% 
+    filter(grepl(input$SEOKeyword,keyword,ignore.case=TRUE),
+           grepl(paste0(input$KeywordCategory,collapse="|"),branded,ignore.case=TRUE),
+           grepl(paste0(input$KeywordSearchType,collapse="|"),search_type,ignore.case=TRUE),
+           grepl(paste0(input$KeywordDevice,collapse="|"),device,ignore.case=TRUE),                                                  
+           grepl(paste0(input$KeywordCountry,collapse="|"),country,ignore.case=TRUE)) %>% 
+    mutate(timespan=case_when(
+      input$WebTimeDimension=='Week'~search_week,
+      input$WebTimeDimension=='Month'~search_month,
+      input$WebTimeDimension=='Quarter'~search_quarter)) %>% 
+    group_by(timespan) %>% 
+    summarise(Impressions=sum(impressions),
+                            Clicks=sum(clicks),
+                            AvgRank=sum(agg_rank)/sum(impressions)) %>% 
+    rename_at(vars(starts_with(input$SEOMeasure)), list(~paste0("measure"))) 
+})
+
+
+searchConsoleKeywordData <- reactive({
+  keyword_data<-search_console_keyword_performance_edited %>% 
+                  filter(grepl(input$SEOKeyword,keyword,ignore.case=TRUE),
+                         grepl(paste0(input$KeywordCategory,collapse="|"),branded),
+                         grepl(paste0(input$KeywordSearchType,collapse="|"),search_type,ignore.case=TRUE),
+                         grepl(paste0(input$KeywordDevice,collapse="|"),device,ignore.case=TRUE),                                                  
+                         grepl(paste0(input$KeywordCountry,collapse="|"),country,ignore.case=TRUE)) %>% 
+                      mutate(timespan=case_when(
+                        input$WebTimeDimension=='Week'~search_week,
+                        input$WebTimeDimension=='Month'~search_month,
+                        input$WebTimeDimension=='Quarter'~search_quarter)) %>% 
+    group_by(keyword,timespan) %>% 
+                  summarise(avg_rank=sum(agg_rank)/sum(impressions)) %>% 
+                  inner_join(search_console_keyword_performance_edited %>% 
+                               filter(grepl(input$SEOKeyword,keyword,ignore.case=TRUE),
+                                      grepl(paste0(input$KeywordCategory,collapse="|"),branded),
+                                      grepl(paste0(input$KeywordSearchType,collapse="|"),search_type,ignore.case=TRUE),
+                                      grepl(paste0(input$KeywordDevice,collapse="|"),device,ignore.case=TRUE),                                                  
+                                      grepl(paste0(input$KeywordCountry,collapse="|"),country,ignore.case=TRUE)) %>% 
+                               group_by(keyword) %>% 
+                               summarise(impressions=sum(impressions)) %>% 
+                               arrange(desc(impressions)) %>% 
+                               slice(1:10) %>% 
+                               select(keyword))
+  
+  
+})
+```
+
+
+Sidebar {.sidebar }
+=====================================
+###### **Data Updated:** _`r file.info('inc/web_seo_data.RData')$mtime` ._
+
+```{r}
+
+
+dateRangeInput('WebTimeRange',
+      label = 'Choose the time range',
+      min=RiHana::get_relevant_date()$yoy_date,
+      max=RiHana::get_relevant_date()$yesterdays_date,
+      start = RiHana::get_relevant_date()$ytd_date, 
+      end = RiHana::get_relevant_date()$yesterdays_date,
+      weekstart = 1
+    )
+
+
+radioButtons("WebTimeDimension",label="Pick the time interval",
+             choices=c("Week","Month","Quarter"),
+             selected="Month")
+helpText("Note: Time interval specifies the X axis where appicable for trending data")
+
+
+selectizeInput(
+        'WebChannel', 'Choose a channel', choices = unique(web_data_all_edited$channel),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+
+selectInput("WebEntryPage", label = "Choose an Entry Page Category",
+            choices = c("All" ="*",
+                        "Landing" = "Landing Page",
+                        "Blog" = "Blog",
+                        "WWW" = "WWW"), 
+            selected = c("All"),
+            multiple = FALSE)
+
+
+```
+
+<strong>Channel</strong> - How did the visitor arrive to the website
+
+<strong>Active Users</strong> - Count of uniquely identified daily users in a given time frame
+
+<strong>Lead Form Views</strong> - Number of website visits that contained at least one view of a lead form
+
+<strong>Lead Form Submissions</strong> - Number of website visits that contained at least one lead form submission
+
+<strong>Form Conversion</strong> - Lead Form Submissions / Lead Form Views
+
+<strong>Site Conversion</strong> - Lead Form Submissions / Active Users
+
+<strong>Site Conversion</strong> - Lead Form Submissions / Active Users
+
+```{r }
+
+helpText("Note: Text fields (Filter Content and Keyword) support Regular Expression Searches.  You can use '|' as an 'or' (e.g., Dallas|Irvine).  You can also use '.*' as a wildcard (e.g. Dallas.*Free) for fuzzy searches.")
+
+```
+
+Website Performance 
+===================================== 
+
+Column{data-height=650,width=8}
+-------------------------------------
+
+### Web Performance
+
+```{r }
+fillRow(
+fillCol(flex=c(2,1,9),
+        fillRow(
+          renderGauge({
+            web_conversion_dat<-updatedWebConversion()
+            gauge(web_conversion_dat$form_conversion,
+                  label="Form Conversion", 
+                  min = 0, max = 50, 
+                  symbol = '%', 
+                  gaugeSectors(
+                    success = c(30, 50), 
+                    warning = c(10, 29), 
+                    danger = c(0, 9)
+                    ))
+            }),
+          renderGauge({
+            site_conversion_dat<-updatedWebConversion()
+            gauge(site_conversion_dat$site_conversion,
+                  label="Site Conversion", 
+                  min = 0, max = 10, 
+                  symbol = '%', 
+                  gaugeSectors(
+                    success = c(5, 10), 
+                    warning = c(2, 4), 
+                    danger = c(0, 1)
+                    ))
+            })
+          ),
+        selectInput("WebMeasure", label = "Choose a metric",
+            choices = c("Active_Users","Lead Form Views","Lead Form Submissions","Form Conversion","Site Conversion"), 
+            selected = c("Active_Users"),
+            multiple = FALSE),
+        renderPlotly({
+          web_dat<-updatedWebData()
+          bar_type<-ifelse(input$WebMeasure %in% c("Form Conversion","Site Conversion"),"group","stack")
+          plot_ly(web_dat,
+#                  marker = list(color = "#002D36"),
+                  y = ~measure,
+                  x= ~timespan,
+                  color=~channel,
+                  colors = hana_color_palette(n_distinct(web_dat$channel)),
+                  type="bar") %>% 
+            layout(
+#              barmode = "group",
+              barmode=bar_type,
+              bargap=0.1,
+              legend = list(orientation = 'h'),
+              title = input$WebMeasure,
+              yaxis = list(title=input$WebMeasure))
+          })
+    ),
+fillCol(flex=c(5,1,6),
+        fillRow(
+renderPlotly({
+  m <- list(
+  l = 250,
+  r = 25,
+  b = 25,
+  t = 25,
+  pad = 4
+)
+  content_dat<-updatedContentData()
+  plot_ly(content_dat,
+        marker = list(color = "#002D36"),
+        orientation='h',
+        y = ~page,
+        x= ~users,
+        name='Users',
+        type="bar")%>%
+    add_trace(x=~converters,name='Converters',marker = list(color = "#977124")) %>% 
+  layout(barmode = 'group',
+         title = 'Top Content',
+         legend = list(orientation = 'h'),
+         margin=m)
+
+})
+)
+,
+fillRow(textInput("WebFilter", 
+          label = "Filter Content:",
+          placeholder="*",
+          width="25%")
+),
+
+fillRow(
+renderPlotly({
+  lead_dat<-updatedLeadData()
+  plot_ly(lead_dat,
+        marker = list(color = "#002D36"),
+        orientation='h',
+        y = ~tracking_code,
+        x= ~leads,
+        name='Leads',
+         type="bar") %>% 
+      layout(title = 'Top Lead Types')
+
+
+})   
+)
+)
+)
+```
+
+SEO
+===================================== 
+
+Column
+-------------------------------------
+
+### SEO
+```{r }
+fillCol(flex=c(1,2),
+        fillRow(flex=c(6,5,5),
+        renderPlotly({
+          referring_domains_dat<-ahrefs_referring_domains_edited
+          plot_ly(referring_domains_dat,
+                  marker = list(color = "#002D36"),
+                  y = ~referring_domains,
+                  x= ~date,
+                  type="bar") %>% 
+      layout(title = 'Referring Domains')
+          }),
+        renderPlotly({
+          domain_rank_dat<-ahrefs_domain_rank_edited
+          plot_ly(domain_rank_dat,
+                  marker = list(color = "#002D36"),
+                  y = ~domain_rank,
+                  x= ~week,
+                  type="bar") %>% 
+      layout(title = 'Domain Rank')
+          }),
+        renderPlotly({
+          backlinks_dat<-ahrefs_backlinks_edited
+          plot_ly(backlinks_dat,
+                  marker = list(color = "#002D36"),
+                  y = ~backlinks,
+                  x= ~date,
+                  type="bar") %>% 
+      layout(title = 'Backlinks')
+          })
+        ),
+      fillRow(flex=c(1,3,4),
+        wellPanel(
+        textInput("SEOKeyword", 
+          label = "Keywords:",
+          placeholder="*"),
+        selectizeInput(
+        'KeywordCategory', 'Keywords to include', choices = unique(search_console_keyword_performance_edited$branded),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+          ),
+        selectizeInput(
+        'KeywordCountry', 'Countries to include', choices = unique(search_console_keyword_performance_edited$country),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+        ),
+        selectizeInput(
+        'KeywordSearchType', 'Search type to include', choices = unique(search_console_keyword_performance_edited$search_type),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+        ),
+        selectizeInput(
+        'KeywordDevice', 'Search device to include', choices = unique(search_console_keyword_performance_edited$device),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+        )
+        ),
+      fillCol(flex=c(3,1),
+              renderPlotly({
+                  keyword_summary_dat<-searchConsoleSummaryData()
+
+                keyword_summary_dat %>%
+                  plot_ly(line = list(color = "#002D36"),
+                          y = ~measure,
+                          x= ~timespan,
+                          type = 'scatter', 
+                          mode = 'lines') %>% 
+      layout(title = 'SEO Trend',
+             yaxis = list(title=input$SEOMeasure))
+              }),
+      selectInput("SEOMeasure", label = "Choose a metric",
+            choices = c("Impressions","Clicks","AvgRank"), 
+            selected = c("AvgRank"),
+            multiple = FALSE)      
+              ),
+              renderPlotly({
+                  keyword_performance_dat<-searchConsoleKeywordData()
+                keyword_performance_dat %>%
+                  plot_ly(marker = list(color = "#002D36"),
+                  y = ~avg_rank,
+                  x= ~timespan,
+                  color=~keyword,
+                  type = 'scatter', 
+                  mode = 'lines') %>% 
+      layout(title = 'Keyword Performance')
+              })
+
+      )
+      )        
+```
+
+
